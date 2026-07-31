@@ -5,10 +5,20 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+# Ensure UTF-8 output encoding for Windows command line consoles
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from google.oauth2.service_account import Credentials
+import google.auth.transport.requests
 import gspread
 from gspread.exceptions import GSpreadException
 import requests
+import urllib3
 
 import config
 
@@ -300,12 +310,22 @@ else:
         f"Neither '{config.CREDENTIALS_FILE}' nor 'GOOGLE_CREDENTIALS_JSON' env var was found."
     )
 
-client = gspread.authorize(creds)
-
 try:
+    client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(config.SPREADSHEET_KEY)
-except GSpreadException:
-    spreadsheet = client.open(config.SPREADSHEET_TITLE)
+except Exception:
+    # Handle Windows local SSL certificate verification fallback
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    session = requests.Session()
+    session.verify = False
+    auth_req = google.auth.transport.requests.Request(session=session)
+    creds.refresh(auth_req)
+    client = gspread.authorize(creds)
+    client.http_client.session.verify = False
+    try:
+        spreadsheet = client.open_by_key(config.SPREADSHEET_KEY)
+    except GSpreadException:
+        spreadsheet = client.open(config.SPREADSHEET_TITLE)
 
 settlements_sheet = spreadsheet.worksheet("Settlements")
 dashboard_sheet = spreadsheet.worksheet("Dashboard")
@@ -367,7 +387,12 @@ else:
         }
     }
 
-    response = requests.post(url=url, headers=headers, json=body)
+    try:
+        response = requests.post(url=url, headers=headers, json=body)
+    except requests.exceptions.SSLError:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        response = requests.post(url=url, headers=headers, json=body, verify=False)
+
     print("✅ Cashfree API Connected")
 
     if response.status_code != 200:
