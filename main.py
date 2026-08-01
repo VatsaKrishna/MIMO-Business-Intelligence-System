@@ -4,6 +4,7 @@ import random
 import sys
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 # Ensure UTF-8 output encoding for Windows command line consoles
 if sys.platform == "win32":
@@ -29,7 +30,7 @@ import config
 CLIENT_ID = config.CASHFREE_CLIENT_ID
 CLIENT_SECRET = config.CASHFREE_CLIENT_SECRET
 PROJECT_NAME = config.PROJECT_NAME
-PROJECT_VERSION = "3.1"
+PROJECT_VERSION = "3.1.2"
 
 MONTHLY_SUMMARY_HEADERS = [
     "YearMonth", "Revenue", "Orders", "Successful Payments", "Failed Payments",
@@ -39,8 +40,25 @@ MONTHLY_SUMMARY_HEADERS = [
 
 
 # ==========================================
-# GOOGLE SHEETS FORMATTING HELPERS
+# HELPER FUNCTIONS
 # ==========================================
+
+def parse_timestamp(timestamp_str: str) -> Optional[datetime]:
+    """Parses date/time strings flexibly (ISO, standard formats)."""
+    if not timestamp_str or not timestamp_str.strip():
+        return None
+    ts = timestamp_str.strip()
+    try:
+        return datetime.fromisoformat(ts.replace("Z", ""))
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(ts[:19], fmt[:19])
+        except Exception:
+            pass
+    return None
+
 
 def format_currency(sheet_id: int, row: int, col: int = 4) -> dict:
     """Format target cell as INR Currency."""
@@ -192,15 +210,16 @@ def clear_demo_rows(worksheet, id_column_index: int, demo_prefix: str) -> None:
     worksheet.update(rows_to_keep)
 
 
-def generate_demo_business(demo_orders_count: int, demo_history_days_count: int) -> list:
-    """Generate simulated settlement records across 6 months for development mode."""
+def generate_demo_business(demo_orders_count: int, demo_history_days_count: int) -> tuple[list, list]:
+    """Generate simulated settlement and raw transaction records for development mode."""
     print("\n🟠 Developer Simulator")
     print("Creating demo historical business data...")
 
     settlements_list = []
+    raw_txns_list = []
 
     for i in range(demo_orders_count):
-        payment_amount = round(random.uniform(5, 250), 2)
+        payment_amount = round(random.uniform(15, 250), 2)
         service_charge = round(payment_amount * 0.015, 2)
         service_tax = round(service_charge * 0.18, 2)
         amount_settled = round(payment_amount - service_charge - service_tax, 2)
@@ -213,20 +232,33 @@ def generate_demo_business(demo_orders_count: int, demo_history_days_count: int)
             + timedelta(seconds=random_seconds)
         )
 
+        status_choice = random.choices(["SUCCESS", "FAILED", "REFUNDED"], weights=[85, 10, 5])[0]
+
         settlement_item = {
             "settlement_date": random_datetime.isoformat(),
             "payment_amount": payment_amount,
-            "amount_settled": amount_settled,
-            "service_charge": service_charge,
-            "service_tax": service_tax,
-            "status": "PAID",
+            "amount_settled": amount_settled if status_choice == "SUCCESS" else 0.0,
+            "service_charge": service_charge if status_choice == "SUCCESS" else 0.0,
+            "service_tax": service_tax if status_choice == "SUCCESS" else 0.0,
+            "status": "PAID" if status_choice == "SUCCESS" else status_choice,
             "cf_settlement_id": f"DEMO{i + 1:04d}",
             "settlement_utr": f"DEMOUTR{i + 1:04d}"
         }
-
         settlements_list.append(settlement_item)
 
-    return settlements_list
+        raw_txn_row = [
+            random_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+            f"CFPAY{i + 1:04d}",
+            payment_amount,
+            random.choice(["UPI", "Card", "Net Banking"]),
+            status_choice,
+            f"9{random.randint(100000000, 999999999)}",
+            f"ORDER{i + 1:04d}",
+            f"CUST{random.randint(1000, 9999)}"
+        ]
+        raw_txns_list.append(raw_txn_row)
+
+    return settlements_list, raw_txns_list
 
 
 # =====================================
@@ -349,6 +381,7 @@ developer_mode_value = str(config_sheet.acell("B2").value)
 DEVELOPMENT_MODE = developer_mode_value.upper() == "TRUE"
 
 clear_demo_rows(settlements_sheet, id_column_index=1, demo_prefix="DEMO")
+clear_demo_rows(raw_sheet, id_column_index=1, demo_prefix="CFPAY")
 
 print("=" * 55)
 print(f"{PROJECT_NAME} Version {PROJECT_VERSION} (Enterprise BI)")
@@ -369,7 +402,9 @@ for row in existing_records[1:]:
         existing_ids.add(str(row[1]).strip())
 
 if DEVELOPMENT_MODE:
-    settlements = generate_demo_business(demo_orders, demo_history_days)
+    settlements, demo_raw_rows = generate_demo_business(demo_orders, demo_history_days)
+    if demo_raw_rows:
+        raw_sheet.append_rows(demo_raw_rows)
 else:
     month_offset = today_dt.month - 5
     year_offset = today_dt.year
@@ -411,7 +446,7 @@ else:
     settlements = data.get("data", [])
 
 # =====================================================
-# 1. SETTLEMENTS LEDGER ENGINE (Preserve Raw Structure)
+# 1. SETTLEMENTS LEDGER ENGINE (Operational Usability)
 # =====================================================
 
 rows = []
@@ -491,10 +526,7 @@ for settlement in settlements:
 if rows:
     settlements_sheet.append_rows(rows)
 
-# Operational Ledger Formatting for Settlements Sheet
 settlements_sheet.freeze(rows=1)
-
-# Format Headers & Currency for Settlements Sheet
 spreadsheet.batch_update({
     "requests": [
         {
@@ -522,17 +554,15 @@ spreadsheet.batch_update({
 
 monthly_groups = {}
 
-# A. Extract Payment Metrics from Raw Transactions
 raw_records = raw_sheet.get_all_values()
-raw_header = raw_records[0] if raw_records else []
 
 today = today_dt.date()
 start_of_week = today - timedelta(days=today.weekday())
 start_of_month = today.replace(day=1)
 
-daily_revenue = 0
-weekly_revenue = 0
-monthly_revenue = 0
+daily_revenue = 0.0
+weekly_revenue = 0.0
+monthly_revenue = 0.0
 daily_orders = 0
 weekly_orders = 0
 monthly_orders = 0
@@ -555,16 +585,16 @@ for r_row in raw_records[1:]:
     if len(r_row) < 5:
         continue
     timestamp_str = r_row[0]
-    try:
-        txn_dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-        txn_date = txn_dt.date()
-        ym_key = txn_dt.strftime("%Y-%m")
-    except Exception:
+    txn_dt = parse_timestamp(timestamp_str)
+    if not txn_dt:
         continue
+
+    txn_date = txn_dt.date()
+    ym_key = txn_dt.strftime("%Y-%m")
 
     try:
         amt = float(r_row[2])
-    except ValueError:
+    except (ValueError, TypeError):
         amt = 0.0
 
     status = str(r_row[4]).upper().strip()
@@ -620,32 +650,33 @@ for r_row in raw_records[1:]:
         if txn_date >= start_of_month:
             monthly_refunds += 1
 
-# B. Extract Settlement Metrics from Settlements Sheet
+# Extract Settlement Metrics from Settlements Sheet
 all_settlement_records = settlements_sheet.get_all_values()
 
-daily_settled = 0
-weekly_settled = 0
-monthly_settled = 0
-daily_charges = 0
-weekly_charges = 0
-monthly_charges = 0
+daily_settled = 0.0
+weekly_settled = 0.0
+monthly_settled = 0.0
+daily_charges = 0.0
+weekly_charges = 0.0
+monthly_charges = 0.0
 settled_amounts = []
 
 for s_row in all_settlement_records[1:]:
     if len(s_row) < 6:
         continue
     date_str = s_row[0]
-    try:
-        s_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        ym_key = date_str[:7]
-    except Exception:
+    s_dt = parse_timestamp(date_str)
+    if not s_dt:
         continue
+
+    s_date = s_dt.date()
+    ym_key = s_dt.strftime("%Y-%m")
 
     try:
         amt_settled = float(s_row[3] or 0)
         scharge = float(s_row[4] or 0)
         stax = float(s_row[5] or 0)
-    except ValueError:
+    except (ValueError, TypeError):
         amt_settled = 0.0
         scharge = 0.0
         stax = 0.0
@@ -982,6 +1013,13 @@ total_settlements_amt = sum(monthly_groups[k]["settlement_amount"] for k in mont
 total_ms_settled = sum(m["settlement_amount"] for m in monthly_groups.values())
 if abs(total_settlements_amt - total_ms_settled) > 0.01:
     validation_errors.append(f"Settlement Amount mismatch: Settlements ({total_settlements_amt}) vs Monthly Summary ({total_ms_settled})")
+
+# Validate Current Month Dashboard vs Monthly Summary Current Month Row
+curr_month_key = today_dt.strftime("%Y-%m")
+if curr_month_key in monthly_groups:
+    ms_curr = monthly_groups[curr_month_key]
+    if abs(monthly_revenue - ms_curr["revenue"]) > 0.01:
+        validation_errors.append(f"Dashboard Current Month Revenue ({monthly_revenue}) vs Monthly Summary ({ms_curr['revenue']})")
 
 if not validation_errors:
     integrity_status_text = "PASS (100% Validated)"
