@@ -35,7 +35,7 @@ PROJECT_VERSION = "3.1.3"
 MONTHLY_SUMMARY_HEADERS = [
     "YearMonth", "Revenue", "Orders", "Successful Payments", "Failed Payments",
     "Refunds", "Refund Amount", "Service Charges", "GST", "Settlement Amount",
-    "Net Settlement", "Success Rate %", "Refund Rate %", "Last Updated"
+    "Net Settlement", "Success Rate %", "Refund Rate %", "Revenue Source", "Last Updated"
 ]
 
 RAW_TRANSACTIONS_HEADERS = [
@@ -720,10 +720,13 @@ for r_row in raw_records[1:]:
         monthly_groups[ym_key] = {
             "revenue": 0.0, "orders": 0, "successful_payments": 0,
             "failed_payments": 0, "refunds": 0, "refund_amount": 0.0,
-            "service_charges": 0.0, "gst": 0.0, "settlement_amount": 0.0
+            "service_charges": 0.0, "gst": 0.0, "settlement_amount": 0.0,
+            "settlement_payment_amount": 0.0, "has_raw_events": False,
+            "revenue_source": "LIVE_WEBHOOK"
         }
 
     m = monthly_groups[ym_key]
+    m["has_raw_events"] = True
     total_transactions += 1
 
     if status == "SUCCESS":
@@ -790,10 +793,12 @@ for s_row in all_settlement_records[1:]:
     ym_key = s_dt.strftime("%Y-%m")
 
     try:
+        gross_pay_amt = float(s_row[2] or 0)
         amt_settled = float(s_row[3] or 0)
         scharge = float(s_row[4] or 0)
         stax = float(s_row[5] or 0)
     except (ValueError, TypeError):
+        gross_pay_amt = 0.0
         amt_settled = 0.0
         scharge = 0.0
         stax = 0.0
@@ -802,11 +807,14 @@ for s_row in all_settlement_records[1:]:
         monthly_groups[ym_key] = {
             "revenue": 0.0, "orders": 0, "successful_payments": 0,
             "failed_payments": 0, "refunds": 0, "refund_amount": 0.0,
-            "service_charges": 0.0, "gst": 0.0, "settlement_amount": 0.0
+            "service_charges": 0.0, "gst": 0.0, "settlement_amount": 0.0,
+            "settlement_payment_amount": 0.0, "has_raw_events": False,
+            "revenue_source": "LIVE_WEBHOOK"
         }
 
     m = monthly_groups[ym_key]
     m["settlement_amount"] += amt_settled
+    m["settlement_payment_amount"] += gross_pay_amt
     m["service_charges"] += scharge
     m["gst"] += stax
     settled_amounts.append(amt_settled)
@@ -820,6 +828,14 @@ for s_row in all_settlement_records[1:]:
     if s_date >= start_of_month:
         monthly_settled += amt_settled
         monthly_charges += scharge
+
+# =====================================================
+# HISTORICAL REVENUE RECONSTRUCTION RULE
+# =====================================================
+for ym_key, m in monthly_groups.items():
+    if not m["has_raw_events"] and m["settlement_payment_amount"] > 0:
+        m["revenue"] = round(m["settlement_payment_amount"], 2)
+        m["revenue_source"] = "RECONSTRUCTED_SETTLEMENT"
 
 # =====================================================
 # 3. TAB 3: MONTHLY SUMMARY DATA STORE SYNC
@@ -849,7 +865,7 @@ for ym_key in sorted_month_keys:
     summary_row = [
         ym_key, rev, orders_cnt, succ_cnt, fail_cnt, ref_cnt, ref_amt,
         scharges, gst_amt, settled_amt, net_settlement, f"{succ_rate:.2f}%",
-        f"{ref_rate:.2f}%", now_timestamp
+        f"{ref_rate:.2f}%", m["revenue_source"], now_timestamp
     ]
     summary_rows.append(summary_row)
 
@@ -857,7 +873,7 @@ monthly_summary_sheet.clear()
 monthly_summary_sheet.update(values=summary_rows, range_name="A1")
 
 monthly_summary_sheet.format(
-    "A1:N1",
+    "A1:O1",
     {
         "backgroundColor": {"red": 0.09, "green": 0.29, "blue": 0.55},
         "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
