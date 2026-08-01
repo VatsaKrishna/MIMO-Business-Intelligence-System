@@ -29,14 +29,20 @@ import config
 CLIENT_ID = config.CASHFREE_CLIENT_ID
 CLIENT_SECRET = config.CASHFREE_CLIENT_SECRET
 PROJECT_NAME = config.PROJECT_NAME
-PROJECT_VERSION = config.PROJECT_VERSION
+PROJECT_VERSION = "3.1"
+
+MONTHLY_SUMMARY_HEADERS = [
+    "YearMonth", "Revenue", "Orders", "Successful Payments", "Failed Payments",
+    "Refunds", "Refund Amount", "Service Charges", "GST", "Settlement Amount",
+    "Net Settlement", "Success Rate %", "Refund Rate %", "Last Updated"
+]
 
 
 # ==========================================
 # GOOGLE SHEETS FORMATTING HELPERS
 # ==========================================
 
-def format_currency(sheet_id: int, row: int) -> dict:
+def format_currency(sheet_id: int, row: int, col: int = 4) -> dict:
     """Format target cell as INR Currency."""
     return {
         "repeatCell": {
@@ -44,8 +50,8 @@ def format_currency(sheet_id: int, row: int) -> dict:
                 "sheetId": sheet_id,
                 "startRowIndex": row - 1,
                 "endRowIndex": row,
-                "startColumnIndex": 3,
-                "endColumnIndex": 4
+                "startColumnIndex": col - 1,
+                "endColumnIndex": col
             },
             "cell": {
                 "userEnteredFormat": {
@@ -60,7 +66,7 @@ def format_currency(sheet_id: int, row: int) -> dict:
     }
 
 
-def format_number(sheet_id: int, row: int) -> dict:
+def format_number(sheet_id: int, row: int, col: int = 4) -> dict:
     """Format target cell as Integer Number."""
     return {
         "repeatCell": {
@@ -68,8 +74,8 @@ def format_number(sheet_id: int, row: int) -> dict:
                 "sheetId": sheet_id,
                 "startRowIndex": row - 1,
                 "endRowIndex": row,
-                "startColumnIndex": 3,
-                "endColumnIndex": 4
+                "startColumnIndex": col - 1,
+                "endColumnIndex": col
             },
             "cell": {
                 "userEnteredFormat": {
@@ -84,7 +90,7 @@ def format_number(sheet_id: int, row: int) -> dict:
     }
 
 
-def format_percent(sheet_id: int, row: int) -> dict:
+def format_percent(sheet_id: int, row: int, col: int = 4) -> dict:
     """Format target cell as Percentage."""
     return {
         "repeatCell": {
@@ -92,8 +98,8 @@ def format_percent(sheet_id: int, row: int) -> dict:
                 "sheetId": sheet_id,
                 "startRowIndex": row - 1,
                 "endRowIndex": row,
-                "startColumnIndex": 3,
-                "endColumnIndex": 4
+                "startColumnIndex": col - 1,
+                "endColumnIndex": col
             },
             "cell": {
                 "userEnteredFormat": {
@@ -187,9 +193,9 @@ def clear_demo_rows(worksheet, id_column_index: int, demo_prefix: str) -> None:
 
 
 def generate_demo_business(demo_orders_count: int, demo_history_days_count: int) -> list:
-    """Generate simulated settlement records for offline development."""
+    """Generate simulated settlement records across 6 months for development mode."""
     print("\n🟠 Developer Simulator")
-    print("Creating demo business data...")
+    print("Creating demo historical business data...")
 
     settlements_list = []
 
@@ -198,11 +204,6 @@ def generate_demo_business(demo_orders_count: int, demo_history_days_count: int)
         service_charge = round(payment_amount * 0.015, 2)
         service_tax = round(service_charge * 0.18, 2)
         amount_settled = round(payment_amount - service_charge - service_tax, 2)
-
-        print("payment_amount =", payment_amount)
-        print("service_charge =", service_charge)
-        print("service_tax =", service_tax)
-        print("calculated amount_settled =", amount_settled)
 
         random_days = random.randint(0, max(demo_history_days_count - 1, 0))
         random_seconds = random.randint(8 * 3600, 21 * 3600)
@@ -232,7 +233,6 @@ def generate_demo_business(demo_orders_count: int, demo_history_days_count: int)
 # DASHBOARD ROW REFERENCES
 # =====================================
 
-# Daily KPIs
 DAILY_HEADER_ROW = 8
 DAILY_REVENUE_ROW = 9
 DAILY_ORDERS_ROW = 10
@@ -244,7 +244,6 @@ DAILY_SERVICE_CHARGE_ROW = 15
 DAILY_GST_ROW = 16
 DAILY_SETTLED_ROW = 17
 
-# Weekly KPIs
 WEEKLY_HEADER_ROW = 19
 WEEKLY_REVENUE_ROW = 20
 WEEKLY_ORDERS_ROW = 21
@@ -256,7 +255,6 @@ WEEKLY_SERVICE_CHARGE_ROW = 26
 WEEKLY_GST_ROW = 27
 WEEKLY_SETTLED_ROW = 28
 
-# Monthly KPIs
 MONTHLY_HEADER_ROW = 30
 MONTHLY_REVENUE_ROW = 31
 MONTHLY_ORDERS_ROW = 32
@@ -268,7 +266,6 @@ MONTHLY_SERVICE_CHARGE_ROW = 37
 MONTHLY_GST_ROW = 38
 MONTHLY_SETTLED_ROW = 39
 
-# Business Overview
 SUMMARY_HEADER_ROW = 41
 TOTAL_SETTLEMENTS_ROW = 42
 AVERAGE_SETTLEMENT_ROW = 43
@@ -277,7 +274,6 @@ LOWEST_SETTLEMENT_ROW = 45
 TOTAL_PAYMENTS_ROW = 46
 TOTAL_REFUNDS_ROW = 47
 
-# Settlement Health
 HEALTH_HEADER_ROW = 50
 COMPLETION_ROW = 51
 PENDING_ROW = 52
@@ -314,7 +310,6 @@ try:
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(config.SPREADSHEET_KEY)
 except Exception:
-    # Handle Windows local SSL certificate verification fallback
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     session = requests.Session()
     session.verify = False
@@ -327,25 +322,31 @@ except Exception:
     except GSpreadException:
         spreadsheet = client.open(config.SPREADSHEET_TITLE)
 
+# Initialize Worksheets
 settlements_sheet = spreadsheet.worksheet("Settlements")
 dashboard_sheet = spreadsheet.worksheet("Dashboard")
 config_sheet = spreadsheet.worksheet("Configuration")
 
-# Read Configuration Values from Google Sheet
-demo_orders = int(config_sheet.acell("B3").value or 25)
-demo_history_days = int(config_sheet.acell("B4").value or 30)
+try:
+    monthly_summary_sheet = spreadsheet.worksheet("Monthly Summary")
+except GSpreadException:
+    monthly_summary_sheet = spreadsheet.add_worksheet(title="Monthly Summary", rows=100, cols=20)
+
+try:
+    historical_analytics_sheet = spreadsheet.worksheet("Historical Analytics")
+except GSpreadException:
+    historical_analytics_sheet = spreadsheet.add_worksheet(title="Historical Analytics", rows=100, cols=10)
+
+# Configuration Values
+demo_orders = int(config_sheet.acell("B3").value or 50)
+demo_history_days = int(config_sheet.acell("B4").value or 180)
 developer_mode_value = str(config_sheet.acell("B2").value)
 DEVELOPMENT_MODE = developer_mode_value.upper() == "TRUE"
 
-# Clear previous demo rows if any
-clear_demo_rows(
-    settlements_sheet,
-    id_column_index=1,
-    demo_prefix="DEMO"
-)
+clear_demo_rows(settlements_sheet, id_column_index=1, demo_prefix="DEMO")
 
 print("=" * 55)
-print(f"{PROJECT_NAME} Version {PROJECT_VERSION}")
+print(f"{PROJECT_NAME} Version {PROJECT_VERSION} (Enterprise BI)")
 print("=" * 55)
 
 if DEVELOPMENT_MODE:
@@ -355,7 +356,6 @@ else:
 
 print("=" * 55)
 
-# Read Existing IDs for De-duplication
 existing_records = settlements_sheet.get_all_values()
 existing_ids = set()
 
@@ -363,12 +363,17 @@ for row in existing_records[1:]:
     if len(row) > 1:
         existing_ids.add(str(row[1]).strip())
 
-# Fetch Settlements Data
 if DEVELOPMENT_MODE:
     settlements = generate_demo_business(demo_orders, demo_history_days)
 else:
-    start_of_month = today_dt.replace(day=1, hour=0, minute=0, second=0)
-    start_date = start_of_month.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # 6 Months Rolling Range (1st day of month 5 months ago to today)
+    month_offset = today_dt.month - 5
+    year_offset = today_dt.year
+    if month_offset <= 0:
+        month_offset += 12
+        year_offset -= 1
+    start_of_6_months = today_dt.replace(year=year_offset, month=month_offset, day=1, hour=0, minute=0, second=0)
+    start_date = start_of_6_months.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_date = today_dt.strftime("%Y-%m-%dT23:59:59Z")
 
     url = "https://api.cashfree.com/pg/settlements"
@@ -381,10 +386,7 @@ else:
     body = {
         "product": "PG",
         "pagination": {"limit": 1000},
-        "filters": {
-            "start_date": start_date,
-            "end_date": end_date
-        }
+        "filters": {"start_date": start_date, "end_date": end_date}
     }
 
     try:
@@ -405,34 +407,34 @@ else:
     settlements = data.get("data", [])
 
 # =====================================================
-# METRICS ENGINE
+# METRICS & MONTHLY AGGREGATION ENGINE
 # =====================================================
 
 rows = []
+monthly_groups = {}
+
+today = today_dt.date()
+start_of_week = today - timedelta(days=today.weekday())
+start_of_month = today.replace(day=1)
+
 daily_revenue = 0
 weekly_revenue = 0
 monthly_revenue = 0
-
 daily_settled = 0
 weekly_settled = 0
 monthly_settled = 0
-
 daily_orders = 0
 weekly_orders = 0
 monthly_orders = 0
-
 daily_charges = 0
 weekly_charges = 0
 monthly_charges = 0
-
 daily_payments = 0
 weekly_payments = 0
 monthly_payments = 0
-
 daily_refunds = 0
 weekly_refunds = 0
 monthly_refunds = 0
-
 daily_failed_payments = 0
 weekly_failed_payments = 0
 monthly_failed_payments = 0
@@ -441,15 +443,9 @@ total_transactions = 0
 total_payments = 0
 total_refunds = 0
 
-today = today_dt.date()
-start_of_week = today - timedelta(days=today.weekday())
-start_of_month = today.replace(day=1)
-
 payment_rows = []
 payment_amounts = []
 settled_amounts = []
-service_charges = []
-service_taxes = []
 
 for settlement in settlements:
     remarks = settlement.get("remarks")
@@ -457,13 +453,13 @@ for settlement in settlements:
     settlement_date_str = settlement.get("settlement_date")
 
     if settlement_date_str:
-        settlement_date = datetime.fromisoformat(settlement_date_str).date()
+        settlement_dt = datetime.fromisoformat(settlement_date_str)
+        settlement_date = settlement_dt.date()
+        year_month_key = settlement_dt.strftime("%Y-%m")
     else:
         continue
 
-    settlement_utr = settlement["settlement_utr"]
-    status = settlement["status"]
-
+    status = settlement.get("status")
     payment_amount = float(settlement.get("payment_amount", 0))
     settled_amount = float(settlement.get("amount_settled") or 0)
     service_charge = float(settlement.get("service_charge", 0))
@@ -485,7 +481,30 @@ for settlement in settlements:
     else:
         settlement_status = "⚠ Unknown"
 
-    # Overall Metrics
+    # Monthly Group Aggregation for Monthly Summary Data Store
+    if year_month_key not in monthly_groups:
+        monthly_groups[year_month_key] = {
+            "revenue": 0.0, "orders": 0, "successful_payments": 0,
+            "failed_payments": 0, "refunds": 0, "refund_amount": 0.0,
+            "service_charges": 0.0, "gst": 0.0, "settlement_amount": 0.0
+        }
+
+    m_group = monthly_groups[year_month_key]
+    m_group["orders"] += 1
+
+    if settlement_status == "💸 Refunded":
+        m_group["refunds"] += 1
+        m_group["refund_amount"] += payment_amount
+    elif settlement_status == "❌ Failed":
+        m_group["failed_payments"] += 1
+    else:
+        m_group["successful_payments"] += 1
+        m_group["revenue"] += payment_amount
+        m_group["service_charges"] += service_charge
+        m_group["gst"] += service_tax
+        m_group["settlement_amount"] += settled_amount
+
+    # Operational Dashboard Metrics
     total_transactions += 1
     if settlement_status == "💸 Refunded":
         total_refunds += 1
@@ -510,14 +529,11 @@ for settlement in settlements:
 
     if settlement_date == today and settlement_status == "❌ Failed":
         daily_failed_payments += 1
-
     if settlement_date >= start_of_week and settlement_status == "❌ Failed":
         weekly_failed_payments += 1
-
     if settlement_date >= start_of_month and settlement_status == "❌ Failed":
         monthly_failed_payments += 1
 
-    # Daily KPIs
     if settlement_date == today:
         if settlement_status == "💸 Refunded":
             daily_refunds += 1
@@ -528,7 +544,6 @@ for settlement in settlements:
             daily_settled += settled_amount
             daily_charges += service_charge
 
-    # Weekly KPIs
     if settlement_date >= start_of_week:
         if settlement_status == "💸 Refunded":
             weekly_refunds += 1
@@ -539,7 +554,6 @@ for settlement in settlements:
             weekly_settled += settled_amount
             weekly_charges += service_charge
 
-    # Monthly KPIs
     if settlement_date >= start_of_month:
         if settlement_status == "💸 Refunded":
             monthly_refunds += 1
@@ -552,10 +566,7 @@ for settlement in settlements:
 
     payment_amounts.append(payment_amount)
     settled_amounts.append(settled_amount)
-    service_charges.append(service_charge)
-    service_taxes.append(service_tax)
 
-    # Health evaluation per row
     if settled_amount == payment_amount:
         settlement_health = "🟢 Excellent"
     elif settled_amount >= payment_amount * 0.95:
@@ -581,41 +592,316 @@ for settlement in settlements:
         remarks,
         settlement_health
     ]
-    payment_row = [
-        settlement.get("settlement_date"),
-        f"TXN{settlement_id}",
-        payment_amount,
-        random.choice(["UPI", "Card", "Net Banking"]),
-        "SUCCESS",
-        f"9{random.randint(100000000, 999999999)}",
-        f"ORDER{settlement_id}",
-        payment_amount,
-        f"CUST{random.randint(1000, 9999)}"
-    ]
-
-    payment_rows.append(payment_row)
     rows.append(row)
 
-# Dynamic Performance Rates
-daily_refund_rate = round(
-    (daily_refunds / max(daily_payments + daily_refunds, 1)) * 100, 2
-)
-weekly_refund_rate = round(
-    (weekly_refunds / max(weekly_payments + weekly_refunds, 1)) * 100, 2
-)
-monthly_refund_rate = round(
-    (monthly_refunds / max(monthly_payments + monthly_refunds, 1)) * 100, 2
+# =====================================================
+# 1. TAB 3: MONTHLY SUMMARY DATA STORE SYNC
+# =====================================================
+
+now_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+summary_rows = [MONTHLY_SUMMARY_HEADERS]
+sorted_month_keys = sorted(monthly_groups.keys())
+
+for ym_key in sorted_month_keys:
+    m = monthly_groups[ym_key]
+    rev = round(m["revenue"], 2)
+    orders_cnt = m["orders"]
+    succ_cnt = m["successful_payments"]
+    fail_cnt = m["failed_payments"]
+    ref_cnt = m["refunds"]
+    ref_amt = round(m["refund_amount"], 2)
+    scharges = round(m["service_charges"], 2)
+    gst_amt = round(m["gst"], 2)
+    settled_amt = round(m["settlement_amount"], 2)
+    net_settlement = round(settled_amt - scharges - gst_amt, 2)
+    
+    succ_rate = round((succ_cnt / max(succ_cnt + fail_cnt, 1)) * 100, 2)
+    ref_rate = round((ref_cnt / max(orders_cnt, 1)) * 100, 2)
+
+    summary_row = [
+        ym_key, rev, orders_cnt, succ_cnt, fail_cnt, ref_cnt, ref_amt,
+        scharges, gst_amt, settled_amt, net_settlement, f"{succ_rate:.2f}%",
+        f"{ref_rate:.2f}%", now_timestamp
+    ]
+    summary_rows.append(summary_row)
+
+monthly_summary_sheet.clear()
+monthly_summary_sheet.update(values=summary_rows, range_name="A1")
+
+# Format Monthly Summary Header
+monthly_summary_sheet.format(
+    "A1:N1",
+    {
+        "backgroundColor": {"red": 0.09, "green": 0.29, "blue": 0.55},
+        "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+    }
 )
 
-daily_success_rate = round(
-    (daily_payments / max(daily_payments + daily_failed_payments, 1)) * 100, 2
-)
-weekly_success_rate = round(
-    (weekly_payments / max(weekly_payments + weekly_failed_payments, 1)) * 100, 2
-)
-monthly_success_rate = round(
-    (monthly_payments / max(monthly_payments + monthly_failed_payments, 1)) * 100, 2
-)
+# =====================================================
+# 2. TAB 2: HISTORICAL ANALYTICS ENGINE
+# =====================================================
+
+# Compute 6-Month Rolling Analytics
+rolling_6_keys = sorted_month_keys[-6:] if len(sorted_month_keys) >= 6 else sorted_month_keys
+r6_rev = sum(monthly_groups[k]["revenue"] for k in rolling_6_keys)
+r6_orders = sum(monthly_groups[k]["orders"] for k in rolling_6_keys)
+r6_succ = sum(monthly_groups[k]["successful_payments"] for k in rolling_6_keys)
+r6_fail = sum(monthly_groups[k]["failed_payments"] for k in rolling_6_keys)
+r6_ref_cnt = sum(monthly_groups[k]["refunds"] for k in rolling_6_keys)
+r6_ref_amt = sum(monthly_groups[k]["refund_amount"] for k in rolling_6_keys)
+r6_scharges = sum(monthly_groups[k]["service_charges"] for k in rolling_6_keys)
+r6_gst = sum(monthly_groups[k]["gst"] for k in rolling_6_keys)
+r6_settled = sum(monthly_groups[k]["settlement_amount"] for k in rolling_6_keys)
+r6_net_settlement = round(r6_settled - r6_scharges - r6_gst, 2)
+r6_succ_rate = round((r6_succ / max(r6_succ + r6_fail, 1)) * 100, 2)
+r6_ref_rate = round((r6_ref_cnt / max(r6_orders, 1)) * 100, 2)
+
+# Compute Yearly Summary (Current Year)
+current_year_str = str(today_dt.year)
+y_keys = [k for k in sorted_month_keys if k.startswith(current_year_str)]
+y_rev = sum(monthly_groups[k]["revenue"] for k in y_keys)
+y_orders = sum(monthly_groups[k]["orders"] for k in y_keys)
+y_succ = sum(monthly_groups[k]["successful_payments"] for k in y_keys)
+y_fail = sum(monthly_groups[k]["failed_payments"] for k in y_keys)
+y_ref_cnt = sum(monthly_groups[k]["refunds"] for k in y_keys)
+y_ref_amt = sum(monthly_groups[k]["refund_amount"] for k in y_keys)
+y_scharges = sum(monthly_groups[k]["service_charges"] for k in y_keys)
+y_gst = sum(monthly_groups[k]["gst"] for k in y_keys)
+y_settled = sum(monthly_groups[k]["settlement_amount"] for k in y_keys)
+y_net_settlement = round(y_settled - y_scharges - y_gst, 2)
+y_succ_rate = round((y_succ / max(y_succ + y_fail, 1)) * 100, 2)
+y_ref_rate = round((y_ref_cnt / max(y_orders, 1)) * 100, 2)
+
+# Executive Insights Calculations
+if sorted_month_keys:
+    highest_rev_key = max(sorted_month_keys, key=lambda k: monthly_groups[k]["revenue"])
+    lowest_rev_key = min(sorted_month_keys, key=lambda k: monthly_groups[k]["revenue"])
+    highest_settled_key = max(sorted_month_keys, key=lambda k: monthly_groups[k]["settlement_amount"])
+
+    highest_rev_desc = f"{highest_rev_key} (₹{monthly_groups[highest_rev_key]['revenue']:.2f})"
+    lowest_rev_desc = f"{lowest_rev_key} (₹{monthly_groups[lowest_rev_key]['revenue']:.2f})"
+    highest_settled_desc = f"{highest_settled_key} (₹{monthly_groups[highest_settled_key]['settlement_amount']:.2f})"
+    avg_m_rev = round(sum(monthly_groups[k]["revenue"] for k in sorted_month_keys) / len(sorted_month_keys), 2)
+    avg_m_orders = round(sum(monthly_groups[k]["orders"] for k in sorted_month_keys) / len(sorted_month_keys), 1)
+
+    # MoM Growth
+    if len(sorted_month_keys) >= 2:
+        prev_m = sorted_month_keys[-2]
+        curr_m = sorted_month_keys[-1]
+        prev_rev = monthly_groups[prev_m]["revenue"]
+        curr_rev = monthly_groups[curr_m]["revenue"]
+        mom_rev_growth = round(((curr_rev - prev_rev) / max(prev_rev, 1.0)) * 100, 2)
+    else:
+        mom_rev_growth = 0.0
+else:
+    highest_rev_desc = "-"
+    lowest_rev_desc = "-"
+    highest_settled_desc = "-"
+    avg_m_rev = 0.0
+    avg_m_orders = 0.0
+    mom_rev_growth = 0.0
+
+r6_range_label = f"{rolling_6_keys[0]} → {rolling_6_keys[-1]}" if rolling_6_keys else "-"
+
+historical_analytics_data = [
+    ["📈 MIMO HISTORICAL BUSINESS INTELLIGENCE ANALYTICS"],
+    [""],
+    ["🕒 Report Generated", "", "", now_timestamp],
+    [""],
+
+    # Rolling 6 Months
+    [f"🗓️ HALF-YEARLY PERFORMANCE (Rolling 6 Months: {r6_range_label})", "", "", ""],
+    ["Revenue", "", "", round(r6_rev, 2)],
+    ["Orders", "", "", r6_orders],
+    ["Successful Payments", "", "", r6_succ],
+    ["Failed Payments", "", "", r6_fail],
+    ["Refunds Count", "", "", r6_ref_cnt],
+    ["Refund Amount", "", "", round(r6_ref_amt, 2)],
+    ["Service Charges", "", "", round(r6_scharges, 2)],
+    ["GST", "", "", round(r6_gst, 2)],
+    ["Settlement Amount", "", "", round(r6_settled, 2)],
+    ["Net Settlement", "", "", r6_net_settlement],
+    ["Success Rate", "", "", f"{r6_succ_rate:.2f}%"],
+    ["Refund Rate", "", "", f"{r6_ref_rate:.2f}%"],
+    [""],
+
+    # Yearly Summary
+    [f"📅 YEARLY BUSINESS SUMMARY ({current_year_str})", "", "", ""],
+    ["Total Revenue", "", "", round(y_rev, 2)],
+    ["Total Orders", "", "", y_orders],
+    ["Total Successful Payments", "", "", y_succ],
+    ["Total Failed Payments", "", "", y_fail],
+    ["Total Refunds Count", "", "", y_ref_cnt],
+    ["Total Refund Amount", "", "", round(y_ref_amt, 2)],
+    ["Total Service Charges", "", "", round(y_scharges, 2)],
+    ["Total GST", "", "", round(y_gst, 2)],
+    ["Total Settlement Amount", "", "", round(y_settled, 2)],
+    ["Net Settlement", "", "", y_net_settlement],
+    ["Success Rate", "", "", f"{y_succ_rate:.2f}%"],
+    ["Refund Rate", "", "", f"{y_ref_rate:.2f}%"],
+    [""],
+
+    # Executive Insights
+    ["🧠 EXECUTIVE INSIGHTS ENGINE", "", "", ""],
+    ["Highest Revenue Month", "", "", highest_rev_desc],
+    ["Lowest Revenue Month", "", "", lowest_rev_desc],
+    ["Highest Settlement Month", "", "", highest_settled_desc],
+    ["Average Monthly Revenue", "", "", avg_m_rev],
+    ["Average Monthly Orders", "", "", avg_m_orders],
+    ["Latest MoM Revenue Growth %", "", "", f"{mom_rev_growth:.2f}%"],
+    [""],
+    ["────────────────────────────────────────────────────────────"],
+    ["MBIS v3.1 Enterprise BI System"],
+    ["Developed by Vatsa Krishna Raj | © 2026 Vision Printt Technologies LLP"]
+]
+
+historical_analytics_sheet.freeze(rows=1)
+historical_analytics_sheet.columns_auto_resize(0, 2)
+historical_analytics_sheet.clear()
+historical_analytics_sheet.update(values=historical_analytics_data, range_name="A1")
+
+# Format Historical Analytics Sections
+spreadsheet.batch_update({
+    "requests": [
+        {
+            "mergeCells": {
+                "range": {
+                    "sheetId": historical_analytics_sheet.id,
+                    "startRowIndex": 0, "endRowIndex": 1,
+                    "startColumnIndex": 0, "endColumnIndex": 4
+                },
+                "mergeType": "MERGE_ALL"
+            }
+        },
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": historical_analytics_sheet.id,
+                    "startRowIndex": 0, "endRowIndex": 1,
+                    "startColumnIndex": 0, "endColumnIndex": 4
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "horizontalAlignment": "CENTER",
+                        "textFormat": {"fontSize": 15, "bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                        "backgroundColor": {"red": 0.09, "green": 0.29, "blue": 0.55}
+                    }
+                },
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)"
+            }
+        },
+        format_section(historical_analytics_sheet.id, 5, 0.48, 0.29, 0.69),
+        format_section(historical_analytics_sheet.id, 19, 0.09, 0.29, 0.55),
+        format_section(historical_analytics_sheet.id, 33, 0.22, 0.63, 0.29),
+        format_currency(historical_analytics_sheet.id, 6),
+        format_currency(historical_analytics_sheet.id, 11),
+        format_currency(historical_analytics_sheet.id, 12),
+        format_currency(historical_analytics_sheet.id, 13),
+        format_currency(historical_analytics_sheet.id, 14),
+        format_currency(historical_analytics_sheet.id, 15),
+        format_currency(historical_analytics_sheet.id, 20),
+        format_currency(historical_analytics_sheet.id, 25),
+        format_currency(historical_analytics_sheet.id, 26),
+        format_currency(historical_analytics_sheet.id, 27),
+        format_currency(historical_analytics_sheet.id, 28),
+        format_currency(historical_analytics_sheet.id, 29),
+        format_currency(historical_analytics_sheet.id, 37),
+        {
+            "addChart": {
+                "chart": {
+                    "spec": {
+                        "title": "Monthly Revenue & Settlement Trend",
+                        "basicChart": {
+                            "chartType": "COLUMN",
+                            "legendPosition": "BOTTOM_LEGEND",
+                            "axis": [
+                                {"position": "BOTTOM_AXIS", "title": "Month"},
+                                {"position": "LEFT_AXIS", "title": "Amount (₹)"}
+                            ],
+                            "domains": [
+                                {
+                                    "domain": {
+                                        "sourceRange": {
+                                            "sources": [
+                                                {
+                                                    "sheetId": monthly_summary_sheet.id,
+                                                    "startRowIndex": 0,
+                                                    "endRowIndex": len(summary_rows),
+                                                    "startColumnIndex": 0,
+                                                    "endColumnIndex": 1
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            ],
+                            "series": [
+                                {
+                                    "series": {
+                                        "sourceRange": {
+                                            "sources": [
+                                                {
+                                                    "sheetId": monthly_summary_sheet.id,
+                                                    "startRowIndex": 0,
+                                                    "endRowIndex": len(summary_rows),
+                                                    "startColumnIndex": 1,
+                                                    "endColumnIndex": 2
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    "targetAxis": "LEFT_AXIS"
+                                },
+                                {
+                                    "series": {
+                                        "sourceRange": {
+                                            "sources": [
+                                                {
+                                                    "sheetId": monthly_summary_sheet.id,
+                                                    "startRowIndex": 0,
+                                                    "endRowIndex": len(summary_rows),
+                                                    "startColumnIndex": 9,
+                                                    "endColumnIndex": 10
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    "targetAxis": "LEFT_AXIS"
+                                }
+                            ],
+                            "headerCount": 1
+                        }
+                    },
+                    "position": {
+                        "overlayPosition": {
+                            "anchorCell": {
+                                "sheetId": historical_analytics_sheet.id,
+                                "rowIndex": 41,
+                                "columnIndex": 0
+                            },
+                            "offsetXPixels": 0,
+                            "offsetYPixels": 0,
+                            "widthPixels": 580,
+                            "heightPixels": 320
+                        }
+                    }
+                }
+            }
+        }
+    ]
+})
+
+# =====================================================
+# 3. TAB 1: OPERATIONAL DASHBOARD PRESERVATION
+# =====================================================
+
+daily_refund_rate = round((daily_refunds / max(daily_payments + daily_refunds, 1)) * 100, 2)
+weekly_refund_rate = round((weekly_refunds / max(weekly_payments + weekly_refunds, 1)) * 100, 2)
+monthly_refund_rate = round((monthly_refunds / max(monthly_payments + monthly_refunds, 1)) * 100, 2)
+
+daily_success_rate = round((daily_payments / max(daily_payments + daily_failed_payments, 1)) * 100, 2)
+weekly_success_rate = round((weekly_payments / max(weekly_payments + weekly_failed_payments, 1)) * 100, 2)
+monthly_success_rate = round((monthly_payments / max(monthly_payments + monthly_failed_payments, 1)) * 100, 2)
 
 print("\n==============================")
 print("METRICS ENGINE")
@@ -743,9 +1029,8 @@ dashboard_data = [
 
     [""],
     ["────────────────────────────────────────────────────────────"],
-    ["MBIS v3.0 (Development Preview)"],
-    ["Developed by", "", "", "Vatsa Krishna Raj"],
-    ["© 2026 Vision Printt Technologies LLP"]
+    ["MBIS v3.1 Enterprise BI System"],
+    ["Developed by Vatsa Krishna Raj | © 2026 Vision Printt Technologies LLP"]
 ]
 
 dashboard_sheet.freeze(rows=1)
@@ -1075,10 +1360,11 @@ if rows:
 print("\n==============================")
 print("SYNC SUMMARY")
 print("==============================")
-print(f"Payments Synced     : {len(payment_rows)}")
-print(f"Settlements Synced  : {len(rows)}")
-print("Dashboard Updated   : ✓")
-print("\n✔ MBIS Sync Complete")
+print(f"Settlements Synced    : {len(rows)}")
+print(f"Monthly Summary Tabs  : {len(sorted_month_keys)} Months")
+print(f"Historical Analytics  : Synced (Rolling 6M + Yearly)")
+print("Dashboard Updated     : ✓")
+print("\n✔ MBIS v3.1 Sync Complete")
 
 execution_time = time.time() - start_time
-print(f"⏱ Execution Time    {execution_time:.2f}s")
+print(f"⏱ Execution Time      {execution_time:.2f}s")
